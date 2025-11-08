@@ -1,5 +1,5 @@
 import streamlit as st
-from whoisjson import WhoisJsonClient
+import requests
 import json
 from datetime import datetime
 
@@ -24,13 +24,38 @@ def get_api_key():
         st.error(f"Error loading API key from secrets: {e}")
         return None
 
-# Initialize client
-@st.cache_resource
-def get_client():
-    api_key = get_api_key()
-    if api_key:
-        return WhoisJsonClient(api_key=api_key)
-    return None
+# API helper functions
+def whois_lookup(domain, api_key):
+    """Perform WHOIS lookup"""
+    url = "https://whoisjson.com/api/v1/whois"
+    params = {"domain": domain}
+    headers = {"Authorization": f"Token={api_key}"}
+    
+    response = requests.get(url, params=params, headers=headers)
+    response.raise_for_status()
+    return response.json()
+
+def nslookup(domain, api_key, record_type=None):
+    """Perform DNS lookup"""
+    url = "https://whoisjson.com/api/v1/nslookup"
+    params = {"domain": domain}
+    if record_type and record_type != "All Records":
+        params["type"] = record_type
+    headers = {"Authorization": f"Token={api_key}"}
+    
+    response = requests.get(url, params=params, headers=headers)
+    response.raise_for_status()
+    return response.json()
+
+def ssl_cert_check(domain, api_key):
+    """Check SSL certificate"""
+    url = "https://whoisjson.com/api/v1/ssl"
+    params = {"domain": domain}
+    headers = {"Authorization": f"Token={api_key}"}
+    
+    response = requests.get(url, params=params, headers=headers)
+    response.raise_for_status()
+    return response.json()
 
 # Helper function to display JSON results
 def display_result(result, title):
@@ -42,16 +67,18 @@ def display_result(result, title):
         
         # Display formatted data
         if isinstance(result, dict):
-            cols = st.columns(2)
-            idx = 0
+            # Create a more organized display
             for key, value in result.items():
-                with cols[idx % 2]:
-                    if isinstance(value, (dict, list)):
-                        st.markdown(f"**{key}:**")
-                        st.json(value)
-                    else:
-                        st.markdown(f"**{key}:** {value}")
-                idx += 1
+                if isinstance(value, dict):
+                    st.markdown(f"**{key}:**")
+                    for sub_key, sub_value in value.items():
+                        st.markdown(f"  - *{sub_key}:* {sub_value}")
+                elif isinstance(value, list):
+                    st.markdown(f"**{key}:**")
+                    for item in value:
+                        st.markdown(f"  - {item}")
+                else:
+                    st.markdown(f"**{key}:** {value}")
 
 # Main app
 def main():
@@ -59,8 +86,8 @@ def main():
     st.markdown("Explore WHOIS, DNS, and SSL certificate information for any domain")
     
     # Check if API key is available
-    client = get_client()
-    if not client:
+    api_key = get_api_key()
+    if not api_key:
         st.error("❌ API key not found in Supabase secrets. Please configure `whoisjson.api_key` in your secrets.")
         st.info("Add your API key to `.streamlit/secrets.toml`:\n```toml\n[whoisjson]\napi_key = \"your-api-key-here\"\n```")
         return
@@ -88,7 +115,7 @@ def main():
         if lookup_btn and domain:
             with st.spinner(f"Fetching WHOIS data for {domain}..."):
                 try:
-                    result = client.whois(domain)
+                    result = whois_lookup(domain, api_key)
                     display_result(result, f"WHOIS Information for {domain}")
                     
                     # Download button
@@ -98,6 +125,8 @@ def main():
                         file_name=f"whois_{domain}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
                         mime="application/json"
                     )
+                except requests.exceptions.HTTPError as e:
+                    st.error(f"❌ HTTP Error: {e.response.status_code} - {e.response.text}")
                 except Exception as e:
                     st.error(f"❌ Error: {str(e)}")
     
@@ -119,11 +148,7 @@ def main():
         if lookup_btn and domain:
             with st.spinner(f"Fetching DNS records for {domain}..."):
                 try:
-                    if record_type == "All Records":
-                        result = client.nslookup(domain)
-                    else:
-                        result = client.nslookup(domain, record_type=record_type)
-                    
+                    result = nslookup(domain, api_key, record_type)
                     display_result(result, f"DNS Records for {domain}")
                     
                     # Download button
@@ -133,6 +158,8 @@ def main():
                         file_name=f"dns_{domain}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
                         mime="application/json"
                     )
+                except requests.exceptions.HTTPError as e:
+                    st.error(f"❌ HTTP Error: {e.response.status_code} - {e.response.text}")
                 except Exception as e:
                     st.error(f"❌ Error: {str(e)}")
     
@@ -149,13 +176,15 @@ def main():
         if check_btn and domain:
             with st.spinner(f"Checking SSL certificate for {domain}..."):
                 try:
-                    result = client.ssl_cert_check(domain)
+                    result = ssl_cert_check(domain, api_key)
                     display_result(result, f"SSL Certificate for {domain}")
                     
                     # Show certificate validity
                     if isinstance(result, dict):
                         if 'valid_from' in result and 'valid_to' in result:
                             st.info(f"📅 Valid from: {result['valid_from']} to {result['valid_to']}")
+                        elif 'notBefore' in result and 'notAfter' in result:
+                            st.info(f"📅 Valid from: {result['notBefore']} to {result['notAfter']}")
                     
                     # Download button
                     st.download_button(
@@ -164,6 +193,8 @@ def main():
                         file_name=f"ssl_{domain}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
                         mime="application/json"
                     )
+                except requests.exceptions.HTTPError as e:
+                    st.error(f"❌ HTTP Error: {e.response.status_code} - {e.response.text}")
                 except Exception as e:
                     st.error(f"❌ Error: {str(e)}")
     
@@ -197,24 +228,41 @@ def main():
             
             results = {}
             progress_bar = st.progress(0)
+            status_container = st.container()
             
             for idx, domain in enumerate(domains):
                 try:
                     if batch_operation == "WHOIS Lookup":
-                        results[domain] = client.whois(domain)
+                        results[domain] = whois_lookup(domain, api_key)
                     elif batch_operation == "DNS Lookup":
-                        results[domain] = client.nslookup(domain)
+                        results[domain] = nslookup(domain, api_key)
                     elif batch_operation == "SSL Certificate Check":
-                        results[domain] = client.ssl_cert_check(domain)
+                        results[domain] = ssl_cert_check(domain, api_key)
                     
-                    st.success(f"✅ Completed: {domain}")
+                    with status_container:
+                        st.success(f"✅ Completed: {domain}")
+                except requests.exceptions.HTTPError as e:
+                    with status_container:
+                        st.error(f"❌ Failed: {domain} - HTTP {e.response.status_code}")
+                    results[domain] = {"error": f"HTTP {e.response.status_code}: {e.response.text}"}
                 except Exception as e:
-                    st.error(f"❌ Failed: {domain} - {str(e)}")
+                    with status_container:
+                        st.error(f"❌ Failed: {domain} - {str(e)}")
                     results[domain] = {"error": str(e)}
                 
                 progress_bar.progress((idx + 1) / len(domains))
             
             st.success(f"🎉 Batch operation completed! Processed {len(domains)} domains")
+            
+            # Display summary
+            successful = sum(1 for r in results.values() if "error" not in r)
+            failed = len(domains) - successful
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                st.metric("Successful", successful, delta=None)
+            with col2:
+                st.metric("Failed", failed, delta=None)
             
             # Display all results
             with st.expander("📊 View All Results", expanded=True):
@@ -233,6 +281,15 @@ def main():
     st.sidebar.markdown("### About")
     st.sidebar.info("This app uses the WhoisJSON API to provide domain information, DNS records, and SSL certificate details.")
     st.sidebar.markdown("[WhoisJSON Documentation](https://whoisjson.com/documentation)")
+    
+    # API Info
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("### API Endpoints")
+    st.sidebar.code("""
+WHOIS: /api/v1/whois?domain=...
+DNS:   /api/v1/nslookup?domain=...
+SSL:   /api/v1/ssl?domain=...
+    """)
 
 if __name__ == "__main__":
     main()
